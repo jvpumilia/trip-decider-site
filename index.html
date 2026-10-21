@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trip Decider · Decide where to stay, fairly</title>
+<meta name="robots" content="noindex">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏡</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css?v=2">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/">Trip Decider <small>decide where to stay, fairly</small></a>
+  <div class="userchip" id="userchip" hidden><span id="user-name"></span><button class="link" id="signout">Sign out</button></div>
+</header>
+<main id="app" class="wrap"></main>
+<div id="modal" class="modal" hidden><div class="modal-card"><button class="close" id="modal-close" aria-label="Close">×</button><div id="modal-body"></div></div></div>
+<div id="toast" class="toast" hidden></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
+<script src="config.js?v=2"></script>
+<script src="wizard.js?v=2"></script>
+<script src="app.js?v=2"></script>
+</body>
+</html>
