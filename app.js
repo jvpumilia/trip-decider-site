@@ -55,7 +55,8 @@
       <form id="f-up" class="stack" hidden><label class="f">Your name <input name="name" required placeholder="e.g. Aunt Mary"></label><label class="f">Email <input type="email" name="email" required autocomplete="email"></label><label class="f">Password (8+ characters) <input type="password" name="password" required minlength="8" autocomplete="new-password"></label><button class="btn primary">Create account</button></form>
       <p id="auth-msg" class="msg" hidden></p></div>`;
     const msg = (m, ok) => { const el = $("#auth-msg"); el.textContent = m; el.className = "msg" + (ok ? " ok" : ""); el.hidden = false; };
-    const redirectTo = location.origin + location.pathname + (joinCode ? `#/join/${joinCode}` : "");
+    // the join code rides in the query string: a hash would collide with the tokens the sign-in link appends
+    const redirectTo = location.origin + location.pathname + (joinCode ? `?join=${encodeURIComponent(joinCode)}` : "");
     $$(".tab").forEach((t) => t.onclick = () => { $$(".tab").forEach((x) => x.classList.toggle("active", x === t)); $("#f-link").hidden = t.dataset.t !== "link"; $("#f-in").hidden = t.dataset.t !== "in"; $("#f-up").hidden = t.dataset.t !== "up"; });
     $("#f-link").onsubmit = async (e) => {
       e.preventDefault(); const email = new FormData(e.target).get("email").trim(); const b = e.target.querySelector("button"); b.disabled = true;
@@ -450,16 +451,21 @@
   async function route() {
     closeModal();
     let h = location.hash || "#/";
-    if (/^#(access_token|error|type)=/.test(h) || /[#&]type=(magiclink|recovery|signup|invite)/.test(h)) {
+    const qJoin = new URLSearchParams(location.search).get("join");
+    if (qJoin) pendingJoin = qJoin.toUpperCase();
+    if (/^#(access_token|error|type)=/.test(h) || /[#&]type=(magiclink|recovery|signup|invite)/.test(h) || location.search) {
       // the sign-in link brought us here; supabase-js has read the tokens, so tidy the address and carry on
       const rec = /type=recovery/.test(h);
-      h = rec ? "#/password" : (sessionStorage.getItem("td_after_auth") || "#/");
-      sessionStorage.removeItem("td_after_auth");
-      history.replaceState(null, "", location.pathname + h); return route();
+      const errDesc = (h.match(/error_description=([^&]+)/) || [])[1];
+      h = rec ? "#/password" : (pendingJoin ? `#/join/${pendingJoin}` : "#/");
+      history.replaceState(null, "", location.pathname + h);
+      if (errDesc) toast(decodeURIComponent(errDesc.replace(/\+/g, " ")), 8000);
+      if (!S.session) { const { data: { session } } = await sb.auth.getSession(); S.session = session; }
+      return route();
     }
     const j = h.match(/^#\/join\/([A-Za-z0-9]+)/);
     if (j) pendingJoin = j[1].toUpperCase();
-    if (!S.session) { $("#userchip").hidden = true; if (pendingJoin) sessionStorage.setItem("td_after_auth", `#/join/${pendingJoin}`); renderAuth(pendingJoin); return; }
+    if (!S.session) { $("#userchip").hidden = true; renderAuth(pendingJoin); return; }
     if (!S.profile) await loadProfile();
     if (h.startsWith("#/password")) { renderPassword(); return; }
     if (pendingJoin) {
