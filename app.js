@@ -39,27 +39,42 @@
     if (!S.session) { S.profile = null; return; }
     const { data } = await sb.from("profiles").select("*").eq("id", S.session.user.id).maybeSingle();
     S.profile = data;
-    if (!data) { const { data: created } = await sb.from("profiles").insert({ id: S.session.user.id, display_name: S.session.user.user_metadata?.name || "Member", email: S.session.user.email }).select("*").single(); S.profile = created; }
+    if (!data) { const { data: created } = await sb.from("profiles").insert({ id: S.session.user.id, display_name: S.session.user.user_metadata?.name || (S.session.user.email || "Member").split("@")[0], email: S.session.user.email }).select("*").single(); S.profile = created; }
     $("#userchip").hidden = false; $("#user-name").textContent = S.profile?.display_name || S.session.user.email;
   }
   $("#signout").onclick = async () => { await sb.auth.signOut(); $("#userchip").hidden = true; go("#/"); };
 
-  function renderAuth() {
+  function renderAuth(joinCode) {
     $("#app").innerHTML = `<div class="card pad auth stack">
       <h1>Where are we going?</h1>
       <p class="muted">Your group writes its own rules. Every option is scored the same way. Then you decide by a method you agreed on first.</p>
-      <div class="tabs small"><button class="tab active" data-t="in">Sign in</button><button class="tab" data-t="up">Create account</button></div>
-      <form id="f-in" class="stack"><label class="f">Email <input type="email" name="email" required autocomplete="email"></label><label class="f">Password <input type="password" name="password" required autocomplete="current-password"></label><button class="btn primary">Sign in</button></form>
+      ${joinCode ? `<p class="notice">You've been invited to a trip (code <b>${esc(joinCode)}</b>). Sign in and you'll join it automatically.</p>` : ""}
+      <div class="tabs small"><button class="tab active" data-t="link">Email me a link</button><button class="tab" data-t="in">Password</button><button class="tab" data-t="up">Create account</button></div>
+      <form id="f-link" class="stack"><label class="f">Email <input type="email" name="email" required autocomplete="email"></label><button class="btn primary">Send me a sign-in link</button><p class="muted tiny">No password to remember. We email you a link that signs you in; it works once and expires in an hour. First time here? The same link creates your account.</p></form>
+      <form id="f-in" class="stack" hidden><label class="f">Email <input type="email" name="email" required autocomplete="email"></label><label class="f">Password <input type="password" name="password" required autocomplete="current-password"></label><button class="btn primary">Sign in</button><button type="button" class="link" id="forgot">Forgot your password? Email me a reset link.</button></form>
       <form id="f-up" class="stack" hidden><label class="f">Your name <input name="name" required placeholder="e.g. Aunt Mary"></label><label class="f">Email <input type="email" name="email" required autocomplete="email"></label><label class="f">Password (8+ characters) <input type="password" name="password" required minlength="8" autocomplete="new-password"></label><button class="btn primary">Create account</button></form>
       <p id="auth-msg" class="msg" hidden></p></div>`;
     const msg = (m, ok) => { const el = $("#auth-msg"); el.textContent = m; el.className = "msg" + (ok ? " ok" : ""); el.hidden = false; };
-    $$(".tab").forEach((t) => t.onclick = () => { $$(".tab").forEach((x) => x.classList.toggle("active", x === t)); $("#f-in").hidden = t.dataset.t !== "in"; $("#f-up").hidden = t.dataset.t !== "up"; });
+    const redirectTo = location.origin + location.pathname + (joinCode ? `#/join/${joinCode}` : "");
+    $$(".tab").forEach((t) => t.onclick = () => { $$(".tab").forEach((x) => x.classList.toggle("active", x === t)); $("#f-link").hidden = t.dataset.t !== "link"; $("#f-in").hidden = t.dataset.t !== "in"; $("#f-up").hidden = t.dataset.t !== "up"; });
+    $("#f-link").onsubmit = async (e) => {
+      e.preventDefault(); const email = new FormData(e.target).get("email").trim(); const b = e.target.querySelector("button"); b.disabled = true;
+      const { error } = await sb.auth.signInWithOtp({ email, options: { emailRedirectTo: redirectTo } });
+      b.disabled = false;
+      if (error) return msg(error.message);
+      msg(`Sent. Check ${email} for a link from Trip Decider (look in spam the first time). You can close this tab.`, true);
+    };
     $("#f-in").onsubmit = async (e) => { e.preventDefault(); const f = new FormData(e.target); const { error } = await sb.auth.signInWithPassword({ email: f.get("email"), password: f.get("password") }); if (error) msg(error.message); };
+    $("#forgot").onclick = async () => { const email = $("#f-in input[name=email]").value.trim(); if (!email) return msg("Type your email first, then tap the reset link."); const { error } = await sb.auth.resetPasswordForEmail(email, { redirectTo: location.origin + location.pathname + "#/password" }); if (error) return msg(error.message); msg(`Sent. Check ${email} for a reset link.`, true); };
     $("#f-up").onsubmit = async (e) => {
       e.preventDefault(); const f = new FormData(e.target); const b = e.target.querySelector("button"); b.disabled = true;
       try { await callFn("signup", { name: f.get("name"), email: f.get("email"), password: f.get("password") }); const { error } = await sb.auth.signInWithPassword({ email: f.get("email"), password: f.get("password") }); if (error) msg(error.message); }
       catch (err) { msg(err.message); } finally { b.disabled = false; }
     };
+  }
+  function renderPassword() {
+    $("#app").innerHTML = `<div class="card pad auth stack"><h1>Choose a new password</h1><form id="f-pw" class="stack"><label class="f">New password (8+ characters) <input type="password" name="password" required minlength="8" autocomplete="new-password"></label><button class="btn primary">Save</button></form><p id="auth-msg" class="msg" hidden></p></div>`;
+    $("#f-pw").onsubmit = async (e) => { e.preventDefault(); const { error } = await sb.auth.updateUser({ password: new FormData(e.target).get("password") }); const el = $("#auth-msg"); el.hidden = false; if (error) { el.textContent = error.message; el.className = "msg"; return; } el.textContent = "Saved. Taking you to your trips…"; el.className = "msg ok"; setTimeout(() => go("#/"), 800); };
   }
 
   // ---------------------------------------------------------------- home
@@ -387,7 +402,13 @@
     el.innerHTML = `<div class="grid2">
       <div class="card stack"><h3>Who's in</h3>${T.households.map((h) => `<div><b>${esc(h.name)}</b> <span class="muted tiny">${esc(h.home_town || "")}</span>${T.members.filter((m) => m.household_id === h.id).map((m) => `<div class="small">· ${esc(m.profiles?.display_name || m.profiles?.email || "")} ${m.role === "organizer" ? `<span class="tag info">organizer</span>` : ""}</div>`).join("") || `<div class="muted tiny">nobody yet</div>`}</div>`).join("")}${T.members.filter((m) => !m.household_id).length ? `<div><b>Not in a household yet</b>${T.members.filter((m) => !m.household_id).map((m) => `<div class="small">· ${esc(m.profiles?.display_name || "")}</div>`).join("")}</div>` : ""}</div>
       <div class="card stack"><h3>You</h3><label class="f">Your household <select id="my-hh"><option value="">Choose…</option>${T.households.map((h) => `<option value="${h.id}" ${T.me?.household_id === h.id ? "selected" : ""}>${esc(h.name)}</option>`).join("")}</select></label><p class="muted tiny">Your household is your voting unit and your nomination allowance.</p>
-        ${isOrg() ? `<h3>Invite people</h3><p class="small">Share the code <b style="font-size:18px;letter-spacing:.06em">${esc(T.trip.invite_code)}</b> and this link: <code>${esc(location.origin + location.pathname)}#/</code>. They create an account, enter the code, and pick their household.</p>` : ""}</div></div>`;
+        ${T.me?.role !== "viewer" ? `<h3>Invite people</h3><p class="small">Share this link: <code>${esc(location.origin + location.pathname)}#/join/${esc(T.trip.invite_code)}</code> (or the code <b style="letter-spacing:.06em">${esc(T.trip.invite_code)}</b>). Or let us email it:</p>
+        <form id="f-invite" class="stack"><label class="f">Email addresses, separated by commas <textarea name="emails" rows="2" placeholder="mom@example.com, uncle.bob@example.com"></textarea></label><label class="f">A note from you (optional) <input name="note" placeholder="e.g. Add any house you like by Friday; we vote the week after."></label><button class="btn">Send invitations</button></form><p id="invite-msg" class="msg" hidden></p>` : ""}</div></div>`;
+    $("#f-invite")?.addEventListener("submit", async (e) => {
+      e.preventDefault(); const f = new FormData(e.target); const b = e.target.querySelector("button"); b.disabled = true; const el = $("#invite-msg");
+      try { const r = await callFn("invite", { trip_id: T.trip.id, emails: f.get("emails"), note: f.get("note") }); el.hidden = false; el.className = "msg ok"; el.textContent = `Sent ${r.sent} invitation${r.sent === 1 ? "" : "s"}.`; e.target.reset(); }
+      catch (err) { el.hidden = false; el.className = "msg"; el.textContent = err.message; } finally { b.disabled = false; }
+    });
     $("#my-hh").onchange = async (e) => { const { error } = await sb.from("memberships").update({ household_id: e.target.value || null }).eq("trip_id", T.trip.id).eq("user_id", S.session.user.id); if (error) return toast(error.message, 6000); S.trip = await loadTrip(T.trip.id); renderTrip("people"); toast("Saved."); };
   }
 
@@ -425,11 +446,28 @@
   }
 
   // ---------------------------------------------------------------- routing
+  let pendingJoin = null;
   async function route() {
     closeModal();
-    const h = location.hash || "#/";
-    if (!S.session) { $("#userchip").hidden = true; renderAuth(); return; }
+    let h = location.hash || "#/";
+    if (/^#(access_token|error|type)=/.test(h) || /[#&]type=(magiclink|recovery|signup|invite)/.test(h)) {
+      // the sign-in link brought us here; supabase-js has read the tokens, so tidy the address and carry on
+      const rec = /type=recovery/.test(h);
+      h = rec ? "#/password" : (sessionStorage.getItem("td_after_auth") || "#/");
+      sessionStorage.removeItem("td_after_auth");
+      history.replaceState(null, "", location.pathname + h); return route();
+    }
+    const j = h.match(/^#\/join\/([A-Za-z0-9]+)/);
+    if (j) pendingJoin = j[1].toUpperCase();
+    if (!S.session) { $("#userchip").hidden = true; if (pendingJoin) sessionStorage.setItem("td_after_auth", `#/join/${pendingJoin}`); renderAuth(pendingJoin); return; }
     if (!S.profile) await loadProfile();
+    if (h.startsWith("#/password")) { renderPassword(); return; }
+    if (pendingJoin) {
+      const code = pendingJoin; pendingJoin = null;
+      const { data, error } = await sb.rpc("join_trip", { code, name: S.profile?.display_name || null });
+      if (error) { toast(error.message.replace(/^[a-z_]+: /, ""), 7000); go("#/"); return; }
+      toast("You're in. Pick your household below.", 5000); go(`#/trip/${data}/people`); return;
+    }
     const m = h.match(/^#\/trip\/([0-9a-f-]+)(?:\/([a-z]+))?/), w = h.match(/^#\/new(?:\/([0-9a-f-]+))?/);
     if (w) { $("#app").innerHTML = `<p class="progress"><span class="spinner"></span>Loading…</p>`; await window.Wizard.render(w[1] || null); return; }
     if (m) {
