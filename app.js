@@ -514,11 +514,12 @@
     let h = location.hash || "#/";
     const qJoin = new URLSearchParams(location.search).get("join");
     if (qJoin) pendingJoin = qJoin.toUpperCase();
-    if (/^#(access_token|error|type)=/.test(h) || /[#&]type=(magiclink|recovery|signup|invite)/.test(h) || location.search) {
+    const tokensInHash = /^#(access_token|error|type)=/.test(h) || /[#&](access_token|error_description)=/.test(h);
+    if (tokensInHash || qJoin) {
       // the sign-in link brought us here; supabase-js has read the tokens, so tidy the address and carry on
       const rec = /type=recovery/.test(h);
       const errDesc = (h.match(/error_description=([^&]+)/) || [])[1];
-      h = rec ? "#/password" : (pendingJoin ? `#/join/${pendingJoin}` : "#/");
+      h = rec ? "#/password" : (pendingJoin ? `#/join/${pendingJoin}` : (tokensInHash ? "#/" : h));
       history.replaceState(null, "", location.pathname + h);
       if (errDesc) toast(decodeURIComponent(errDesc.replace(/\+/g, " ")), 8000);
       if (!S.session) { const { data: { session } } = await sb.auth.getSession(); S.session = session; }
