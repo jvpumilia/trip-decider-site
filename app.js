@@ -97,7 +97,7 @@
 
   // ---------------------------------------------------------------- trip workspace
   async function loadTrip(id) {
-    const [trip, rules, members, households, constraints, dests, listings, noms, evals, ballot, results, vetoes] = await Promise.all([
+    const [trip, rules, members, households, constraints, dests, listings, noms, evals, ballot, results, vetoes, weekVotes, messages] = await Promise.all([
       sb.from("trips").select("*").eq("id", id).maybeSingle(),
       sb.from("trip_rules").select("*").eq("trip_id", id).maybeSingle(),
       sb.from("memberships").select("*, profiles(display_name, email)").eq("trip_id", id),
@@ -110,22 +110,26 @@
       sb.from("ballots").select("*").eq("trip_id", id).eq("user_id", S.session.user.id).maybeSingle(),
       sb.from("results").select("*").eq("trip_id", id).order("computed_at", { ascending: false }).limit(1),
       sb.from("vetoes").select("*").eq("trip_id", id),
+      sb.from("week_votes").select("*").eq("trip_id", id),
+      sb.from("messages").select("*").eq("trip_id", id).order("created_at", { ascending: true }).limit(400),
     ]);
     if (!trip.data) return null;
     const me = (members.data || []).find((m) => m.user_id === S.session.user.id);
-    return { trip: trip.data, rules: rules.data, members: members.data || [], households: households.data || [], constraints: constraints.data || [], dests: dests.data || [], listings: listings.data || [], noms: noms.data || [], evals: evals.data || [], ballot: ballot.data, result: (results.data || [])[0] || null, vetoes: vetoes.data || [], me };
+    const listingIds = (listings.data || []).map((l) => l.listing_id);
+    const { data: windows } = listingIds.length ? await sb.from("availability_windows").select("*").in("listing_id", listingIds) : { data: [] };
+    return { trip: trip.data, rules: rules.data, members: members.data || [], households: households.data || [], constraints: constraints.data || [], dests: dests.data || [], listings: listings.data || [], noms: noms.data || [], evals: evals.data || [], ballot: ballot.data, result: (results.data || [])[0] || null, vetoes: vetoes.data || [], weekVotes: weekVotes.data || [], messages: messages.data || [], windows: windows || [], me };
   }
   let realtime = null;
   function watch(id) {
     if (realtime) { sb.removeChannel(realtime); realtime = null; }
     let t;
     const refresh = () => { clearTimeout(t); t = setTimeout(async () => { if (S.trip?.trip.id !== id) return; const fresh = await loadTrip(id); if (fresh) { S.trip = fresh; renderTrip(currentTab); } }, 500); };
-    realtime = sb.channel("trip-" + id).on("postgres_changes", { event: "*", schema: "public", table: "trip_listings", filter: `trip_id=eq.${id}` }, refresh).on("postgres_changes", { event: "*", schema: "public", table: "nominations", filter: `trip_id=eq.${id}` }, refresh).on("postgres_changes", { event: "*", schema: "public", table: "trip_destinations", filter: `trip_id=eq.${id}` }, refresh).subscribe();
+    realtime = sb.channel("trip-" + id).on("postgres_changes", { event: "*", schema: "public", table: "trip_listings", filter: `trip_id=eq.${id}` }, refresh).on("postgres_changes", { event: "*", schema: "public", table: "nominations", filter: `trip_id=eq.${id}` }, refresh).on("postgres_changes", { event: "*", schema: "public", table: "trip_destinations", filter: `trip_id=eq.${id}` }, refresh).on("postgres_changes", { event: "*", schema: "public", table: "messages", filter: `trip_id=eq.${id}` }, refresh).on("postgres_changes", { event: "*", schema: "public", table: "week_votes", filter: `trip_id=eq.${id}` }, refresh).subscribe();
   }
   window.TD.loadTrip = loadTrip;
 
   let currentTab = "overview";
-  const TABS = [["overview", "Overview"], ["places", "Places"], ["houses", "Houses"], ["vote", "Vote"], ["results", "Results"], ["people", "People"], ["settings", "Settings"]];
+  const TABS = [["overview", "Overview"], ["places", "Places"], ["houses", "Houses"], ["dates", "Dates"], ["chat", "Chat"], ["vote", "Vote"], ["results", "Results"], ["people", "People"], ["settings", "Settings"]];
   const hhName = (id) => S.trip.households.find((h) => h.id === id)?.name || "";
   const myHousehold = () => S.trip.me?.household_id || null;
   const isOrg = () => S.trip.me?.role === "organizer";
@@ -150,7 +154,7 @@
       <nav class="tabs">${tabs.map(([k, l]) => `<button class="tab ${k === currentTab ? "active" : ""}" data-tab="${k}">${l}</button>`).join("")}</nav>
       <section id="panel"></section>`;
     $$("[data-tab]").forEach((b) => b.onclick = () => go(`#/trip/${t.id}/${b.dataset.tab}`));
-    ({ overview: renderOverview, places: renderPlaces, houses: renderHouses, vote: renderVote, results: renderResults, people: renderPeople, settings: renderSettings })[currentTab]?.($("#panel"));
+    ({ overview: renderOverview, places: renderPlaces, houses: renderHouses, dates: renderDates, chat: renderChat, vote: renderVote, results: renderResults, people: renderPeople, settings: renderSettings })[currentTab]?.($("#panel"));
   }
 
   const rulesSummary = () => {
@@ -323,7 +327,10 @@
       </div>
       <div class="card stack"><b>Availability for our dates</b><p class="muted tiny">The site can't read a host's calendar. When you check, record what you learned. "Not available" removes the house from the ballot; it is the only thing that does.</p>
         <div class="row"><button class="btn small ${l.avail_status === "available" ? "primary" : ""}" data-av="available">Confirmed open</button><button class="btn small danger" data-av="unavailable">Not available for our dates</button><button class="btn small ghost" data-av="unknown">Clear</button></div>
-        ${l.avail_note ? `<div class="muted tiny">${esc(l.avail_note)}</div>` : ""}</div>
+        ${l.avail_note ? `<div class="muted tiny">${esc(l.avail_note)}</div>` : ""}
+        <details><summary class="small">Record what the host's calendar showed (feeds the Dates tab)</summary>
+          <form id="f-window" class="row" style="margin-top:8px"><label class="f">From <input type="date" name="start_date" required></label><label class="f">To <input type="date" name="end_date" required></label><label class="f">It was <select name="status"><option value="available">open</option><option value="booked">booked</option></select></label><button class="btn small">Save</button></form>
+          ${S.trip.windows.filter((w) => w.listing_id === l.listing_id).sort((a, b) => a.start_date.localeCompare(b.start_date)).map((w) => `<div class="tiny"><span class="tag ${w.status === "available" ? "ok" : "warn"}">${w.status === "available" ? "open" : "booked"}</span> ${fmtDate(w.start_date)} to ${fmtDate(w.end_date)} <span class="muted">${w.source === "member" ? "seen by " + esc(nameOf(w.recorded_by)) : "from the owner's calendar"}</span></div>`).join("")}</details></div>
       ${photos.length > 1 ? `<div class="gallery">${photos.slice(1, 13).map((p) => `<img src="${esc(p)}" alt="" referrerpolicy="no-referrer" loading="lazy">`).join("")}</div>` : ""}
       <details><summary class="muted tiny">More</summary><div class="tiny muted">${l.added_via === "member" && !S.trip.rules?.blind_submitters ? `Added by ${esc(S.trip.members.find((m) => m.user_id === l.added_by)?.profiles?.display_name || "a member")}. ` : l.added_via === "ai" ? "Found by web search. " : l.is_sponsored ? "Added by a partner. " : ""}${l.notes ? `Notes: ${esc(l.notes)}` : ""}</div><pre class="tiny" style="white-space:pre-wrap;max-height:240px;overflow:auto">${esc((L.description || "").slice(0, 4000))}</pre></details>
       <div id="house-progress" class="progress" hidden></div></div>`);
@@ -332,7 +339,61 @@
     $("#nominate")?.addEventListener("click", async () => { const { error } = await sb.from("nominations").insert({ trip_id: S.trip.trip.id, household_id: mine, trip_listing_id: id, nominated_by: S.session.user.id }); if (error) return toast(error.message.replace(/^[a-z_]+: /, ""), 6000); toast("Nominated. It is on the ballot."); after(); });
     $("#withdraw")?.addEventListener("click", async () => { const { error } = await sb.from("nominations").delete().eq("id", myNom.id); if (error) return toast(error.message.replace(/^[a-z_]+: /, ""), 6000); after(); });
     $("#rescore")?.addEventListener("click", async () => { prog(`<span class="spinner"></span>Re-reading and re-scoring (about a minute)…`); try { await callFn("ingest", { action: "score", trip_id: S.trip.trip.id, trip_listing_id: id, reread: true }); after(); } catch (e) { prog(esc(e.message)); } });
+    $("#f-window")?.addEventListener("submit", async (e) => { e.preventDefault(); const f = Object.fromEntries(new FormData(e.target).entries()); const { error } = await sb.from("availability_windows").insert({ listing_id: l.listing_id, start_date: f.start_date, end_date: f.end_date, status: f.status, source: "member", recorded_by: S.session.user.id }); if (error) return toast(error.message, 6000); after(); });
     $$("[data-av]").forEach((b) => b.onclick = async () => { const st = b.dataset.av; let note = null; if (st !== "unknown") { note = prompt(st === "available" ? "Optional: what did you see? (e.g. 'host confirmed June 12-19 open')" : "What did you learn? (e.g. 'host says booked that week')") ; if (note === null) return; } const { error } = await sb.from("trip_listings").update({ avail_status: st, avail_note: note || null, avail_by: S.session.user.id, avail_at: new Date().toISOString() }).eq("id", id); if (error) return toast(error.message, 6000); after(); });
+  }
+
+  // ---------------------------------------------------------------- dates (which week?)
+  const iso = (d) => d.toISOString().slice(0, 10);
+  const addDays = (d, n) => { const x = new Date(d); x.setUTCDate(x.getUTCDate() + n); return x; };
+  function seasonWeeks() {
+    const t = S.trip.trip; if (!t.season_start || !t.season_end) return [];
+    let d = new Date(t.season_start + "T00:00:00Z"); while (d.getUTCDay() !== 6) d = addDays(d, 1); // first Saturday
+    const end = new Date(t.season_end + "T00:00:00Z"), out = [];
+    while (addDays(d, t.nights) <= addDays(end, 1) && out.length < 30) { out.push({ start: iso(d), end: iso(addDays(d, t.nights)) }); d = addDays(d, 7); }
+    return out;
+  }
+  const weekLabel = (w) => new Date(w.start + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+  const overlaps = (a1, a2, b1, b2) => a1 < b2 && b1 < a2;
+  function weekStatus(listingId, w) {
+    const ws = S.trip.windows.filter((x) => x.listing_id === listingId && overlaps(x.start_date, x.end_date, w.start, w.end));
+    if (ws.some((x) => x.status === "booked")) return "booked";
+    if (ws.some((x) => x.status === "available" && x.start_date <= w.start && x.end_date >= w.end)) return "open";
+    return "unknown";
+  }
+  function householdChoice(hh, ws) {
+    const ids = S.trip.members.filter((m) => m.household_id === hh).map((m) => m.user_id);
+    const cs = S.trip.weekVotes.filter((v) => v.week_start === ws && ids.includes(v.user_id)).map((v) => v.choice);
+    if (!cs.length) return ""; if (cs.includes("no")) return "no"; if (cs.includes("prefer")) return "prefer"; return "ok";
+  }
+  function renderDates(el) {
+    const T = S.trip, weeks = seasonWeeks(), me = S.session.user.id;
+    if (!weeks.length) { el.innerHTML = `<div class="card"><p>The organizer hasn't set the possible date range yet${isOrg() ? ` (<a href="#/new/${T.trip.id}/1">set it in step 1 of the wizard</a>)` : ""}.</p></div>`; return; }
+    const mine = (ws) => T.weekVotes.find((v) => v.user_id === me && v.week_start === ws)?.choice || "";
+    const hhs = T.households;
+    const ranked = weeks.map((w) => { const ch = hhs.map((h) => householdChoice(h.id, w.start)); const open = T.listings.filter((l) => l.status === "scored" && l.avail_status !== "unavailable" && weekStatus(l.listing_id, w) === "open"); return { w, nos: ch.filter((c) => c === "no").length, prefers: ch.filter((c) => c === "prefer").length, oks: ch.filter((c) => c === "ok" || c === "prefer").length, answered: ch.filter(Boolean).length, open }; })
+      .filter((r) => r.answered).sort((a, b) => (a.nos - b.nos) || (b.oks - a.oks) || (b.prefers - a.prefers) || (b.open.length - a.open.length)).slice(0, 5);
+    el.innerHTML = `
+      <div class="card stack"><h3>Which week works for you?</h3><p class="muted small">Tap each ${T.trip.nights}-night week starting on a Saturday and mark it. Everyone answers for themselves; results roll up by household. ${T.trip.check_in ? `<b>The organizer has set ${fmtDate(T.trip.check_in)} to ${fmtDate(T.trip.check_out)}.</b>` : ""}</p>
+        <div class="table-wrap"><table class="t"><tr><th>Week of</th><th>Can't</th><th>Could</th><th>Prefer</th></tr>${weeks.map((w) => `<tr><td><b>${weekLabel(w)}</b> <span class="muted tiny">to ${weekLabel({ start: w.end })}</span></td>${["no", "ok", "prefer"].map((c) => `<td><button class="btn small ${mine(w.start) === c ? "primary" : ""}" data-wk="${w.start}" data-ch="${c}">${c === "no" ? "Can't" : c === "ok" ? "Could" : "Prefer"}</button></td>`).join("")}</tr>`).join("")}</table></div></div>
+      <div class="card stack"><h3>By household</h3><div class="table-wrap"><table class="t"><tr><th>Week of</th>${hhs.map((h) => `<th>${esc(h.name)}</th>`).join("")}<th>Houses confirmed open</th></tr>${weeks.map((w) => `<tr><td><b>${weekLabel(w)}</b></td>${hhs.map((h) => { const c = householdChoice(h.id, w.start); return `<td>${c === "no" ? `<span class="tag warn">can't</span>` : c === "prefer" ? `<span class="tag ok">prefer</span>` : c === "ok" ? `<span class="tag neutral">could</span>` : `<span class="muted tiny">–</span>`}</td>`; }).join("")}<td class="tiny">${T.listings.filter((l) => weekStatus(l.listing_id, w) === "open").map((l) => esc(l.listings.title.slice(0, 24))).join(", ") || "<span class='muted'>none recorded</span>"}</td></tr>`).join("")}</table></div></div>
+      ${ranked.length ? `<div class="card stack"><h3>Best weeks so far</h3>${ranked.map((r, i) => `<div class="rank-item"><div class="n">${i + 1}</div><div><b>Week of ${weekLabel(r.w)}</b> <span class="muted tiny">${r.nos ? `${r.nos} household${r.nos > 1 ? "s" : ""} can't` : "nobody is out"} · ${r.prefers} prefer · ${r.open.length} house${r.open.length === 1 ? "" : "s"} confirmed open</span></div><div class="ctl">${isOrg() ? `<button class="btn small" data-setweek="${r.w.start}|${r.w.end}">Make this our week</button>` : ""}</div></div>`).join("")}</div>` : ""}`;
+    $$("[data-wk]", el).forEach((b) => b.onclick = async () => { const { error } = await sb.from("week_votes").upsert({ trip_id: T.trip.id, user_id: me, week_start: b.dataset.wk, choice: b.dataset.ch }); if (error) return toast(error.message, 6000); S.trip = await loadTrip(T.trip.id); renderTrip("dates"); });
+    $$("[data-setweek]", el).forEach((b) => b.onclick = async () => { const [ci, co] = b.dataset.setweek.split("|"); if (!confirm(`Set the trip to ${fmtDate(ci)} to ${fmtDate(co)}?`)) return; const { error } = await sb.from("trips").update({ check_in: ci, check_out: co }).eq("id", T.trip.id); if (error) return toast(error.message, 6000); S.trip = await loadTrip(T.trip.id); renderTrip("dates"); toast("Dates set. Houses will be judged for that week from now on."); });
+  }
+
+  // ---------------------------------------------------------------- chat
+  const nameOf = (uid) => S.trip.members.find((m) => m.user_id === uid)?.profiles?.display_name || "someone";
+  function renderChat(el) {
+    const T = S.trip;
+    const msgs = T.messages;
+    const tagOf = (m) => m.trip_listing_id ? T.listings.find((l) => l.id === m.trip_listing_id) : null;
+    el.innerHTML = `<div class="card stack"><h3>Family chat</h3><p class="muted small">One thread for everyone. Tag a house so the conversation stays attached to it.</p>
+      <div id="chat-list" style="max-height:55vh;overflow:auto;display:flex;flex-direction:column;gap:10px">${msgs.map((m) => { const t = tagOf(m); return `<div style="display:flex;gap:10px;align-items:flex-start"><div style="width:32px;height:32px;border-radius:50%;background:var(--accent-bg);color:var(--accent);display:flex;align-items:center;justify-content:center;font-weight:800;font-size:12px;flex:none">${esc(nameOf(m.user_id).split(/\s+/).map((x) => x[0]).join("").slice(0, 2).toUpperCase())}</div><div style="min-width:0"><div class="tiny"><b>${esc(nameOf(m.user_id))}</b> <span class="muted">${fmtDT(m.created_at)}</span>${t ? ` · <a href="#" data-open-house="${t.id}">🏠 ${esc(t.listings.title.slice(0, 40))}</a>` : ""}</div><div style="white-space:pre-wrap">${esc(m.body)}</div></div></div>`; }).join("") || `<p class="empty">No messages yet. Say hello.</p>`}</div>
+      <form id="f-chat" class="stack"><textarea name="body" rows="2" maxlength="4000" placeholder="Say something…" required></textarea><div class="row"><select name="tag" style="max-width:320px"><option value="">No house tagged</option>${T.listings.map((l) => `<option value="${l.id}">${esc(l.listings.title.slice(0, 50))}</option>`).join("")}</select><button class="btn primary">Send</button></div></form></div>`;
+    wireOpeners(el);
+    const list = $("#chat-list"); list.scrollTop = list.scrollHeight;
+    $("#f-chat").onsubmit = async (e) => { e.preventDefault(); const f = new FormData(e.target); const body = String(f.get("body")).trim(); if (!body) return; const { error } = await sb.from("messages").insert({ trip_id: T.trip.id, user_id: S.session.user.id, body, trip_listing_id: f.get("tag") || null }); if (error) return toast(error.message, 6000); S.trip = await loadTrip(T.trip.id); renderTrip("chat"); };
   }
 
   // ---------------------------------------------------------------- vote
